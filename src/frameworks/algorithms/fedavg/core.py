@@ -86,6 +86,32 @@ class Server(BaseServer):
         super().__init__(clients, model)
         self.sampler = UniformSampler()
 
+    def _aggregate(self, updates) -> None:
+        """
+        Aggregate client updates using weighted FedAvg and update the server's global model.
+        """
+        aggregated_state = deepcopy(self.model_state_dict)
+        total_samples = sum(update["n_samples"] for update in updates)
+
+        for key in aggregated_state.keys():
+            # Skip BatchNorm statistics and buffers
+            if "running_mean" in key or "running_var" in key or "num_batches_tracked" in key:
+                continue
+
+            weighted_sum = None
+            for update in updates:
+                client_state = update["model"][key]
+                weight = update["n_samples"] / total_samples
+                if weighted_sum is None:
+                    weighted_sum = client_state * weight
+                else:
+                    weighted_sum += client_state * weight
+
+            aggregated_state[key] = weighted_sum
+
+        self.model.load_state_dict(aggregated_state, strict=False)
+        self.model_state_dict = deepcopy(aggregated_state)
+
     def run_round(
             self,
             num_epochs: int,
@@ -133,26 +159,4 @@ class Server(BaseServer):
 
             updates.append(update)
 
-        # Run aggregation
-        aggregated_state = deepcopy(self.model_state_dict)
-        total_samples = sum(update["n_samples"] for update in updates)
-
-        for key in aggregated_state.keys():
-            # Skip BatchNorm statistics and buffers
-            if "running_mean" in key or "running_var" in key or "num_batches_tracked" in key:
-                continue
-
-            weighted_sum = None
-            for update in updates:
-                client_state = update["model"][key]
-                weight = update["n_samples"] / total_samples
-                if weighted_sum is None:
-                    weighted_sum = client_state * weight
-                else:
-                    weighted_sum += client_state * weight
-
-            aggregated_state[key] = weighted_sum
-
-        # Load aggregated weights into server model
-        self.model.load_state_dict(aggregated_state, strict=False)
-        self.model_state_dict = deepcopy(aggregated_state)
+        self._aggregate(updates)
